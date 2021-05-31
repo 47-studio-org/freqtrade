@@ -1,6 +1,8 @@
 # pragma pylint: disable=W0603
 """ Edge positioning package """
 import logging
+from collections import defaultdict
+from copy import deepcopy
 from typing import Any, Dict, List, NamedTuple
 
 import arrow
@@ -12,7 +14,10 @@ from freqtrade.configuration import TimeRange
 from freqtrade.constants import DATETIME_PRINT_FORMAT, UNLIMITED_STAKE_AMOUNT
 from freqtrade.data.history import get_timerange, load_data, refresh_data
 from freqtrade.exceptions import OperationalException
-from freqtrade.strategy.interface import SellType
+from freqtrade.exchange.exchange import timeframe_to_seconds
+from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
+from freqtrade.state import RunMode
+from freqtrade.strategy.interface import IStrategy, SellType
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +49,7 @@ class Edge:
 
         self.config = config
         self.exchange = exchange
-        self.strategy = strategy
+        self.strategy: IStrategy = strategy
 
         self.edge_config = self.config.get('edge', {})
         self._cached_pairs: Dict[str, Any] = {}  # Keeps a list of pairs
@@ -80,10 +85,16 @@ class Edge:
         if config.get('fee'):
             self.fee = config['fee']
         else:
-            self.fee = self.exchange.get_fee(symbol=self.config['exchange']['pair_whitelist'][0])
+            try:
+                self.fee = self.exchange.get_fee(symbol=expand_pairlist(
+                    self.config['exchange']['pair_whitelist'], list(self.exchange.markets))[0])
+            except IndexError:
+                self.fee = None
 
-    def calculate(self) -> bool:
-        pairs = self.config['exchange']['pair_whitelist']
+    def calculate(self, pairs: List[str]) -> bool:
+        if self.fee is None and pairs:
+            self.fee = self.exchange.get_fee(pairs[0])
+
         heartbeat = self.edge_config.get('process_throttle_secs')
 
         if (self._last_updated > 0) and (
@@ -95,13 +106,33 @@ class Edge:
         logger.info('Using local backtesting data (using whitelist in given config) ...')
 
         if self._refresh_pairs:
+            timerange_startup = deepcopy(self._timerange)
+            timerange_startup.subtract_start(timeframe_to_seconds(
+                self.strategy.timeframe) * self.strategy.startup_candle_count)
             refresh_data(
                 datadir=self.config['datadir'],
                 pairs=pairs,
                 exchange=self.exchange,
                 timeframe=self.strategy.timeframe,
-                timerange=self._timerange,
+                timerange=timerange_startup,
+                data_format=self.config.get('dataformat_ohlcv', 'json'),
             )
+            # Download informative pairs too
+            res = defaultdict(list)
+            for p, t in self.strategy.informative_pairs():
+                res[t].append(p)
+            for timeframe, inf_pairs in res.items():
+                timerange_startup = deepcopy(self._timerange)
+                timerange_startup.subtract_start(timeframe_to_seconds(
+                    timeframe) * self.strategy.startup_candle_count)
+                refresh_data(
+                    datadir=self.config['datadir'],
+                    pairs=inf_pairs,
+                    exchange=self.exchange,
+                    timeframe=timeframe,
+                    timerange=timerange_startup,
+                    data_format=self.config.get('dataformat_ohlcv', 'json'),
+                )
 
         data = load_data(
             datadir=self.config['datadir'],
@@ -117,8 +148,11 @@ class Edge:
             self._cached_pairs = {}
             logger.critical("No data found. Edge is stopped ...")
             return False
-
+        # Fake run-mode to Edge
+        prior_rm = self.config['runmode']
+        self.config['runmode'] = RunMode.EDGE
         preprocessed = self.strategy.ohlcvdata_to_dataframe(data)
+        self.config['runmode'] = prior_rm
 
         # Print timeframe
         min_date, max_date = get_timerange(preprocessed)
@@ -156,7 +190,8 @@ class Edge:
         available_capital = (total_capital + capital_in_trade) * self._capital_ratio
         allowed_capital_at_risk = available_capital * self._allowed_risk
         max_position_size = abs(allowed_capital_at_risk / stoploss)
-        position_size = min(max_position_size, free_capital)
+        # Position size must be below available capital.
+        position_size = min(min(max_position_size, free_capital), available_capital)
         if pair in self._cached_pairs:
             logger.info(
                 'winrate: %s, expectancy: %s, position size: %s, pair: %s,'
@@ -174,7 +209,7 @@ class Edge:
         if pair in self._cached_pairs:
             return self._cached_pairs[pair].stoploss
         else:
-            logger.warning('tried to access stoploss of a non-existing pair, '
+            logger.warning(f'Tried to access stoploss of non-existing pair {pair}, '
                            'strategy stoploss is returned instead.')
             return self.strategy.stoploss
 
@@ -205,7 +240,7 @@ class Edge:
 
         return self._final_pairs
 
-    def accepted_pairs(self) -> list:
+    def accepted_pairs(self) -> List[Dict[str, Any]]:
         """
         return a list of accepted pairs along with their winrate, expectancy and stoploss
         """

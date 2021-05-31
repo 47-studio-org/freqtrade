@@ -42,17 +42,19 @@ class StaticPairList(IPairList):
         """
         return f"{self.name}"
 
-    def gen_pairlist(self, cached_pairlist: List[str], tickers: Dict) -> List[str]:
+    def gen_pairlist(self, tickers: Dict) -> List[str]:
         """
         Generate the pairlist
-        :param cached_pairlist: Previously generated pairlist (cached)
-        :param tickers: Tickers (from exchange.get_tickers()).
+        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
         :return: List of pairs
         """
         if self._allow_inactive:
-            return self._config['exchange']['pair_whitelist']
+            return self.verify_whitelist(
+                self._config['exchange']['pair_whitelist'], logger.info, keep_invalid=True
+            )
         else:
-            return self._whitelist_for_active_markets(self._config['exchange']['pair_whitelist'])
+            return self._whitelist_for_active_markets(
+                self.verify_whitelist(self._config['exchange']['pair_whitelist'], logger.info))
 
     def filter_pairlist(self, pairlist: List[str], tickers: Dict) -> List[str]:
         """

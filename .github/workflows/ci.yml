@@ -79,13 +79,13 @@ jobs:
 
     - name: Backtesting
       run: |
-        cp config.json.example config.json
+        cp config_bittrex.json.example config.json
         freqtrade create-userdir --userdir user_data
         freqtrade backtesting --datadir tests/testdata --strategy SampleStrategy
 
     - name: Hyperopt
       run: |
-        cp config.json.example config.json
+        cp config_bittrex.json.example config.json
         freqtrade create-userdir --userdir user_data
         freqtrade hyperopt --datadir tests/testdata -e 5 --strategy SampleStrategy --hyperopt SampleHyperOpt --hyperopt-loss SharpeHyperOptLossDaily --print-all
 
@@ -102,7 +102,7 @@ jobs:
         mypy freqtrade scripts
 
     - name: Slack Notification
-      uses: homoluctus/slatify@v1.8.0
+      uses: lazy-actions/slatify@v3.0.0
       if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
       with:
         type: ${{ job.status }}
@@ -117,7 +117,7 @@ jobs:
     strategy:
       matrix:
         os: [ macos-latest ]
-        python-version: [3.7, 3.8]
+        python-version: [3.7, 3.8, 3.9]
 
     steps:
     - uses: actions/checkout@v2
@@ -146,8 +146,10 @@ jobs:
       run: |
         cd build_helpers && ./install_ta-lib.sh ${HOME}/dependencies/; cd ..
 
-    - name: Installation - *nix
+    - name: Installation - macOS
       run: |
+        brew update
+        brew install hdf5 c-blosc
         python -m pip install --upgrade pip
         export LD_LIBRARY_PATH=${HOME}/dependencies/lib:$LD_LIBRARY_PATH
         export TA_LIBRARY_PATH=${HOME}/dependencies/lib
@@ -170,13 +172,13 @@ jobs:
 
     - name: Backtesting
       run: |
-        cp config.json.example config.json
+        cp config_bittrex.json.example config.json
         freqtrade create-userdir --userdir user_data
         freqtrade backtesting --datadir tests/testdata --strategy SampleStrategy
 
     - name: Hyperopt
       run: |
-        cp config.json.example config.json
+        cp config_bittrex.json.example config.json
         freqtrade create-userdir --userdir user_data
         freqtrade hyperopt --datadir tests/testdata -e 5 --strategy SampleStrategy --hyperopt SampleHyperOpt --hyperopt-loss SharpeHyperOptLossDaily --print-all
 
@@ -193,7 +195,7 @@ jobs:
         mypy freqtrade scripts
 
     - name: Slack Notification
-      uses: homoluctus/slatify@v1.8.0
+      uses: lazy-actions/slatify@v3.0.0
       if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
       with:
         type: ${{ job.status }}
@@ -237,13 +239,13 @@ jobs:
 
     - name: Backtesting
       run: |
-        cp config.json.example config.json
+        cp config_bittrex.json.example config.json
         freqtrade create-userdir --userdir user_data
         freqtrade backtesting --datadir tests/testdata --strategy SampleStrategy
 
     - name: Hyperopt
       run: |
-        cp config.json.example config.json
+        cp config_bittrex.json.example config.json
         freqtrade create-userdir --userdir user_data
         freqtrade hyperopt --datadir tests/testdata -e 5 --strategy SampleStrategy --hyperopt SampleHyperOpt --hyperopt-loss SharpeHyperOptLossDaily --print-all
 
@@ -256,7 +258,7 @@ jobs:
         mypy freqtrade scripts
 
     - name: Slack Notification
-      uses: homoluctus/slatify@v1.8.0
+      uses: lazy-actions/slatify@v3.0.0
       if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
       with:
         type: ${{ job.status }}
@@ -287,7 +289,7 @@ jobs:
         mkdocs build
 
     - name: Slack Notification
-      uses: homoluctus/slatify@v1.8.0
+      uses: lazy-actions/slatify@v3.0.0
       if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
       with:
         type: ${{ job.status }}
@@ -299,7 +301,7 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
     - name: Cleanup previous runs on this branch
-      uses: rokroskar/workflow-run-cleanup-action@v0.2.2
+      uses: rokroskar/workflow-run-cleanup-action@v0.3.3
       if: "!startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/stable' && github.repository == 'freqtrade/freqtrade'"
       env:
         GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
@@ -309,9 +311,18 @@ jobs:
     needs: [ build_linux, build_macos, build_windows, docs_check ]
     runs-on: ubuntu-20.04
     steps:
+
+    - name: Check user permission
+      id: check
+      uses: scherermichael-oss/action-has-permission@1.0.6
+      with:
+        required-permission: write
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Slack Notification
-      uses: homoluctus/slatify@v1.8.0
-      if: always() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      uses: lazy-actions/slatify@v3.0.0
+      if: always() && steps.check.outputs.has-permission && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
       with:
         type: ${{ job.status }}
         job_name: '*Freqtrade CI*'
@@ -363,13 +374,6 @@ jobs:
       run: |
         echo "${DOCKER_PASSWORD}" | docker login --username ${DOCKER_USERNAME} --password-stdin
 
-    - name: Build and test and push docker image
-      env:
-        IMAGE_NAME: freqtradeorg/freqtrade
-        BRANCH_NAME: ${{ steps.extract_branch.outputs.branch }}
-      run: |
-        build_helpers/publish_docker.sh
-
     # We need docker experimental to pull the ARM image.
     - name: Switch docker to experimental
       run: |
@@ -388,16 +392,23 @@ jobs:
     - name: Available platforms
       run: echo ${{ steps.buildx.outputs.platforms }}
 
+    - name: Build and test and push docker image
+      env:
+        IMAGE_NAME: freqtradeorg/freqtrade
+        BRANCH_NAME: ${{ steps.extract_branch.outputs.branch }}
+      run: |
+        build_helpers/publish_docker.sh
+
     - name: Build Raspberry docker image
       env:
         IMAGE_NAME: freqtradeorg/freqtrade
-        BRANCH_NAME: ${{ steps.extract_branch.outputs.branch }}_pi
+        BRANCH_NAME: ${{ steps.extract_branch.outputs.branch }}
       run: |
         build_helpers/publish_docker_pi.sh
 
 
     - name: Slack Notification
-      uses: homoluctus/slatify@v1.8.0
+      uses: lazy-actions/slatify@v3.0.0
       if: always() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
       with:
         type: ${{ job.status }}

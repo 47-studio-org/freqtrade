@@ -23,7 +23,8 @@
     "stoploss": -0.10,
     "unfilledtimeout": {
         "buy": 10,
-        "sell": 30
+        "sell": 30,
+        "unit": "minutes"
     },
     "bid_strategy": {
         "price_side": "bid",
@@ -42,12 +43,15 @@
         "order_book_max": 1,
         "use_sell_signal": true,
         "sell_profit_only": false,
+        "sell_profit_offset": 0.0,
         "ignore_roi_if_buy_signal": false
     },
     "order_types": {
         "buy": "limit",
         "sell": "limit",
         "emergencysell": "market",
+        "forcesell": "market",
+        "forcebuy": "market",
         "stoploss": "market",
         "stoploss_on_exchange": false,
         "stoploss_on_exchange_interval": 60
@@ -103,28 +107,33 @@
         }
     ],
     "exchange": {
-        "name": "bittrex",
+        "name": "binance",
         "sandbox": false,
         "key": "your_exchange_key",
         "secret": "your_exchange_secret",
         "password": "",
         "ccxt_config": {"enableRateLimit": true},
         "ccxt_async_config": {
-            "enableRateLimit": false,
+            "enableRateLimit": true,
             "rateLimit": 500,
             "aiohttp_trust_env": false
         },
         "pair_whitelist": [
+            "ALGO/BTC",
+            "ATOM/BTC",
+            "BAT/BTC",
+            "BCH/BTC",
+            "BRD/BTC",
+            "EOS/BTC",
             "ETH/BTC",
+            "IOTA/BTC",
+            "LINK/BTC",
             "LTC/BTC",
-            "ETC/BTC",
-            "DASH/BTC",
-            "ZEC/BTC",
-            "XLM/BTC",
-            "NXT/BTC",
-            "TRX/BTC",
-            "ADA/BTC",
-            "XMR/BTC"
+            "NEO/BTC",
+            "NXS/BTC",
+            "XMR/BTC",
+            "XRP/BTC",
+            "XTZ/BTC"
         ],
         "pair_blacklist": [
             "DOGE/BTC"
@@ -147,7 +156,7 @@
         "remove_pumps": false
     },
     "telegram": {
-        "enabled": true,
+        "enabled": false,
         "token": "your_telegram_token",
         "chat_id": "your_telegram_chat_id",
         "notification_settings": {
@@ -155,7 +164,18 @@
             "warning": "on",
             "startup": "on",
             "buy": "on",
-            "sell": "on",
+            "buy_fill": "on",
+            "sell": {
+                "roi": "off",
+                "emergency_sell": "off",
+                "force_sell": "off",
+                "sell_signal": "off",
+                "trailing_stop_loss": "off",
+                "stop_loss": "off",
+                "stoploss_on_exchange": "off",
+                "custom_sell": "off"
+            },
+            "sell_fill": "on",
             "buy_cancel": "on",
             "sell_cancel": "on"
         }
@@ -164,12 +184,14 @@
         "enabled": false,
         "listen_ip_address": "127.0.0.1",
         "listen_port": 8080,
-        "verbosity": "info",
+        "verbosity": "error",
+        "enable_openapi": false,
         "jwt_secret_key": "somethingrandom",
         "CORS_origins": [],
         "username": "freqtrader",
         "password": "SuperSecurePassword"
     },
+    "bot_name": "freqtrade",
     "db_url": "sqlite:///tradesv3.sqlite",
     "initial_state": "running",
     "forcebuy_enable": false,

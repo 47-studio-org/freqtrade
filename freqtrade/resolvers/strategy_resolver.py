@@ -68,17 +68,21 @@ class StrategyResolver(IResolver):
                       ("trailing_stop_positive",          None,        None),
                       ("trailing_stop_positive_offset",   0.0,         None),
                       ("trailing_only_offset_is_reached", None,        None),
+                      ("use_custom_stoploss",             None,        None),
                       ("process_only_new_candles",        None,        None),
                       ("order_types",                     None,        None),
                       ("order_time_in_force",             None,        None),
                       ("stake_currency",                  None,        None),
                       ("stake_amount",                    None,        None),
+                      ("protections",                     None,        None),
                       ("startup_candle_count",            None,        None),
                       ("unfilledtimeout",                 None,        None),
                       ("use_sell_signal",                 True,        'ask_strategy'),
                       ("sell_profit_only",                False,       'ask_strategy'),
                       ("ignore_roi_if_buy_signal",        False,       'ask_strategy'),
+                      ("sell_profit_offset",              0.0,         'ask_strategy'),
                       ("disable_dataframe_checks",        False,       None),
+                      ("ignore_buying_expired_candle_after",  0,       'ask_strategy')
                       ]
         for attribute, default, subkey in attributes:
             if subkey:
@@ -192,9 +196,9 @@ class StrategyResolver(IResolver):
             strategy._populate_fun_len = len(getfullargspec(strategy.populate_indicators).args)
             strategy._buy_fun_len = len(getfullargspec(strategy.populate_buy_trend).args)
             strategy._sell_fun_len = len(getfullargspec(strategy.populate_sell_trend).args)
-            if any([x == 2 for x in [strategy._populate_fun_len,
-                                     strategy._buy_fun_len,
-                                     strategy._sell_fun_len]]):
+            if any(x == 2 for x in [strategy._populate_fun_len,
+                                    strategy._buy_fun_len,
+                                    strategy._sell_fun_len]):
                 strategy.INTERFACE_VERSION = 1
 
             return strategy

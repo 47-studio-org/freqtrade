@@ -10,9 +10,12 @@ from pandas import DataFrame
 from freqtrade.configuration import TimeRange
 from freqtrade.data.dataprovider import DataProvider
 from freqtrade.data.history import load_data
-from freqtrade.exceptions import StrategyError
+from freqtrade.exceptions import OperationalException, StrategyError
 from freqtrade.persistence import PairLocks, Trade
 from freqtrade.resolvers import StrategyResolver
+from freqtrade.strategy.hyper import (BaseParameter, CategoricalParameter, DecimalParameter,
+                                      IntParameter, RealParameter)
+from freqtrade.strategy.interface import SellCheckTuple, SellType
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from tests.conftest import log_has, log_has_re
 
@@ -105,9 +108,29 @@ def test_get_signal_old_dataframe(default_conf, mocker, caplog, ohlcv_history):
     assert log_has('Outdated history for pair xyz. Last tick is 16 minutes old', caplog)
 
 
-def test_assert_df_raise(default_conf, mocker, caplog, ohlcv_history):
-    # default_conf defines a 5m interval. we check interval * 2 + 5m
-    # this is necessary as the last candle is removed (partial candles) by default
+def test_ignore_expired_candle(default_conf):
+    default_conf.update({'strategy': 'DefaultStrategy'})
+    strategy = StrategyResolver.load_strategy(default_conf)
+    strategy.ignore_buying_expired_candle_after = 60
+
+    latest_date = datetime(2020, 12, 30, 7, 0, 0, tzinfo=timezone.utc)
+    # Add 1 candle length as the "latest date" defines candle open.
+    current_time = latest_date + timedelta(seconds=80 + 300)
+
+    assert strategy.ignore_expired_candle(latest_date=latest_date,
+                                          current_time=current_time,
+                                          timeframe_seconds=300,
+                                          buy=True) is True
+
+    current_time = latest_date + timedelta(seconds=30 + 300)
+
+    assert not strategy.ignore_expired_candle(latest_date=latest_date,
+                                              current_time=current_time,
+                                              timeframe_seconds=300,
+                                              buy=True) is True
+
+
+def test_assert_df_raise(mocker, caplog, ohlcv_history):
     ohlcv_history.loc[1, 'date'] = arrow.utcnow().shift(minutes=-16)
     # Take a copy to correctly modify the call
     mocked_history = ohlcv_history.copy()
@@ -127,7 +150,7 @@ def test_assert_df_raise(default_conf, mocker, caplog, ohlcv_history):
                    caplog)
 
 
-def test_assert_df(default_conf, mocker, ohlcv_history, caplog):
+def test_assert_df(ohlcv_history, caplog):
     df_len = len(ohlcv_history) - 1
     # Ensure it's running when passed correctly
     _STRATEGY.assert_df(ohlcv_history, len(ohlcv_history),
@@ -196,7 +219,7 @@ def test_min_roi_reached(default_conf, fee) -> None:
             open_date=arrow.utcnow().shift(hours=-1).datetime,
             fee_open=fee.return_value,
             fee_close=fee.return_value,
-            exchange='bittrex',
+            exchange='binance',
             open_rate=1,
         )
 
@@ -235,7 +258,7 @@ def test_min_roi_reached2(default_conf, fee) -> None:
             open_date=arrow.utcnow().shift(hours=-1).datetime,
             fee_open=fee.return_value,
             fee_close=fee.return_value,
-            exchange='bittrex',
+            exchange='binance',
             open_rate=1,
         )
 
@@ -270,7 +293,7 @@ def test_min_roi_reached3(default_conf, fee) -> None:
         open_date=arrow.utcnow().shift(hours=-1).datetime,
         fee_open=fee.return_value,
         fee_close=fee.return_value,
-        exchange='bittrex',
+        exchange='binance',
         open_rate=1,
     )
 
@@ -286,6 +309,121 @@ def test_min_roi_reached3(default_conf, fee) -> None:
     # Should not trigger with 20% profit since after 55 minutes only 30% is active.
     assert not strategy.min_roi_reached(trade, 0.20, arrow.utcnow().shift(minutes=-2).datetime)
     assert strategy.min_roi_reached(trade, 0.31, arrow.utcnow().shift(minutes=-2).datetime)
+
+
+@pytest.mark.parametrize(
+    'profit,adjusted,expected,trailing,custom,profit2,adjusted2,expected2,custom_stop', [
+        # Profit, adjusted stoploss(absolute), profit for 2nd call, enable trailing,
+        #   enable custom stoploss, expected after 1st call, expected after 2nd call
+        (0.2, 0.9, SellType.NONE, False, False, 0.3, 0.9, SellType.NONE, None),
+        (0.2, 0.9, SellType.NONE, False, False, -0.2, 0.9, SellType.STOP_LOSS, None),
+        (0.2, 1.14, SellType.NONE, True, False, 0.05, 1.14, SellType.TRAILING_STOP_LOSS, None),
+        (0.01, 0.96, SellType.NONE, True, False, 0.05, 1, SellType.NONE, None),
+        (0.05, 1, SellType.NONE, True, False, -0.01, 1, SellType.TRAILING_STOP_LOSS, None),
+        # Default custom case - trails with 10%
+        (0.05, 0.95, SellType.NONE, False, True, -0.02, 0.95, SellType.NONE, None),
+        (0.05, 0.95, SellType.NONE, False, True, -0.06, 0.95, SellType.TRAILING_STOP_LOSS, None),
+        (0.05, 1, SellType.NONE, False, True, -0.06, 1, SellType.TRAILING_STOP_LOSS,
+         lambda **kwargs: -0.05),
+        (0.05, 1, SellType.NONE, False, True, 0.09, 1.04, SellType.NONE,
+         lambda **kwargs: -0.05),
+        (0.05, 0.95, SellType.NONE, False, True, 0.09, 0.98, SellType.NONE,
+         lambda current_profit, **kwargs: -0.1 if current_profit < 0.6 else -(current_profit * 2)),
+        # Error case - static stoploss in place
+        (0.05, 0.9, SellType.NONE, False, True, 0.09, 0.9, SellType.NONE,
+         lambda **kwargs: None),
+    ])
+def test_stop_loss_reached(default_conf, fee, profit, adjusted, expected, trailing, custom,
+                           profit2, adjusted2, expected2, custom_stop) -> None:
+
+    default_conf.update({'strategy': 'DefaultStrategy'})
+
+    strategy = StrategyResolver.load_strategy(default_conf)
+    trade = Trade(
+        pair='ETH/BTC',
+        stake_amount=0.01,
+        amount=1,
+        open_date=arrow.utcnow().shift(hours=-1).datetime,
+        fee_open=fee.return_value,
+        fee_close=fee.return_value,
+        exchange='binance',
+        open_rate=1,
+    )
+    trade.adjust_min_max_rates(trade.open_rate)
+    strategy.trailing_stop = trailing
+    strategy.trailing_stop_positive = -0.05
+    strategy.use_custom_stoploss = custom
+    original_stopvalue = strategy.custom_stoploss
+    if custom_stop:
+        strategy.custom_stoploss = custom_stop
+
+    now = arrow.utcnow().datetime
+    sl_flag = strategy.stop_loss_reached(current_rate=trade.open_rate * (1 + profit), trade=trade,
+                                         current_time=now, current_profit=profit,
+                                         force_stoploss=0, high=None)
+    assert isinstance(sl_flag, SellCheckTuple)
+    assert sl_flag.sell_type == expected
+    if expected == SellType.NONE:
+        assert sl_flag.sell_flag is False
+    else:
+        assert sl_flag.sell_flag is True
+    assert round(trade.stop_loss, 2) == adjusted
+
+    sl_flag = strategy.stop_loss_reached(current_rate=trade.open_rate * (1 + profit2), trade=trade,
+                                         current_time=now, current_profit=profit2,
+                                         force_stoploss=0, high=None)
+    assert sl_flag.sell_type == expected2
+    if expected2 == SellType.NONE:
+        assert sl_flag.sell_flag is False
+    else:
+        assert sl_flag.sell_flag is True
+    assert round(trade.stop_loss, 2) == adjusted2
+
+    strategy.custom_stoploss = original_stopvalue
+
+
+def test_custom_sell(default_conf, fee, caplog) -> None:
+
+    default_conf.update({'strategy': 'DefaultStrategy'})
+
+    strategy = StrategyResolver.load_strategy(default_conf)
+    trade = Trade(
+        pair='ETH/BTC',
+        stake_amount=0.01,
+        amount=1,
+        open_date=arrow.utcnow().shift(hours=-1).datetime,
+        fee_open=fee.return_value,
+        fee_close=fee.return_value,
+        exchange='binance',
+        open_rate=1,
+    )
+
+    now = arrow.utcnow().datetime
+    res = strategy.should_sell(trade, 1, now, False, False, None, None, 0)
+
+    assert res.sell_flag is False
+    assert res.sell_type == SellType.NONE
+
+    strategy.custom_sell = MagicMock(return_value=True)
+    res = strategy.should_sell(trade, 1, now, False, False, None, None, 0)
+    assert res.sell_flag is True
+    assert res.sell_type == SellType.CUSTOM_SELL
+    assert res.sell_reason == 'custom_sell'
+
+    strategy.custom_sell = MagicMock(return_value='hello world')
+
+    res = strategy.should_sell(trade, 1, now, False, False, None, None, 0)
+    assert res.sell_type == SellType.CUSTOM_SELL
+    assert res.sell_flag is True
+    assert res.sell_reason == 'hello world'
+
+    caplog.clear()
+    strategy.custom_sell = MagicMock(return_value='h' * 100)
+    res = strategy.should_sell(trade, 1, now, False, False, None, None, 0)
+    assert res.sell_type == SellType.CUSTOM_SELL
+    assert res.sell_flag is True
+    assert res.sell_reason == 'h' * 64
+    assert log_has_re('Custom sell reason returned from custom_sell is too long.*', caplog)
 
 
 def test_analyze_ticker_default(ohlcv_history, mocker, caplog) -> None:
@@ -460,3 +598,82 @@ def test_strategy_safe_wrapper(value):
 
     assert type(ret) == type(value)
     assert ret == value
+
+
+def test_hyperopt_parameters():
+    from skopt.space import Categorical, Integer, Real
+    with pytest.raises(OperationalException, match=r"Name is determined.*"):
+        IntParameter(low=0, high=5, default=1, name='hello')
+
+    with pytest.raises(OperationalException, match=r"IntParameter space must be.*"):
+        IntParameter(low=0, default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"RealParameter space must be.*"):
+        RealParameter(low=0, default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"DecimalParameter space must be.*"):
+        DecimalParameter(low=0, default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"IntParameter space invalid\."):
+        IntParameter([0, 10], high=7, default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"RealParameter space invalid\."):
+        RealParameter([0, 10], high=7, default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"DecimalParameter space invalid\."):
+        DecimalParameter([0, 10], high=7, default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"CategoricalParameter space must.*"):
+        CategoricalParameter(['aa'], default='aa', space='buy')
+
+    with pytest.raises(TypeError):
+        BaseParameter(opt_range=[0, 1], default=1, space='buy')
+
+    intpar = IntParameter(low=0, high=5, default=1, space='buy')
+    assert intpar.value == 1
+    assert isinstance(intpar.get_space(''), Integer)
+    assert isinstance(intpar.range, range)
+    assert len(list(intpar.range)) == 1
+    # Range contains ONLY the default / value.
+    assert list(intpar.range) == [intpar.value]
+    intpar.in_space = True
+
+    assert len(list(intpar.range)) == 6
+    assert list(intpar.range) == [0, 1, 2, 3, 4, 5]
+
+    fltpar = RealParameter(low=0.0, high=5.5, default=1.0, space='buy')
+    assert isinstance(fltpar.get_space(''), Real)
+    assert fltpar.value == 1
+
+    fltpar = DecimalParameter(low=0.0, high=5.5, default=1.0004, decimals=3, space='buy')
+    assert isinstance(fltpar.get_space(''), Integer)
+    assert fltpar.value == 1
+
+    catpar = CategoricalParameter(['buy_rsi', 'buy_macd', 'buy_none'],
+                                  default='buy_macd', space='buy')
+    assert isinstance(catpar.get_space(''), Categorical)
+    assert catpar.value == 'buy_macd'
+
+
+def test_auto_hyperopt_interface(default_conf):
+    default_conf.update({'strategy': 'HyperoptableStrategy'})
+    PairLocks.timeframe = default_conf['timeframe']
+    strategy = StrategyResolver.load_strategy(default_conf)
+
+    assert strategy.buy_rsi.value == strategy.buy_params['buy_rsi']
+    # PlusDI is NOT in the buy-params, so default should be used
+    assert strategy.buy_plusdi.value == 0.5
+    assert strategy.sell_rsi.value == strategy.sell_params['sell_rsi']
+
+    # Parameter is disabled - so value from sell_param dict will NOT be used.
+    assert strategy.sell_minusdi.value == 0.5
+    all_params = strategy.detect_all_parameters()
+    assert isinstance(all_params, dict)
+    assert len(all_params['buy']) == 2
+    assert len(all_params['sell']) == 2
+    assert all_params['count'] == 4
+
+    strategy.__class__.sell_rsi = IntParameter([0, 10], default=5, space='buy')
+
+    with pytest.raises(OperationalException, match=r"Inconclusive parameter.*"):
+        [x for x in strategy.detect_parameters('sell')]

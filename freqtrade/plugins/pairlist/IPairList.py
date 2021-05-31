@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import Any, Dict, List
 
 from freqtrade.exceptions import OperationalException
-from freqtrade.exchange import market_is_active
+from freqtrade.exchange import Exchange, market_is_active
 from freqtrade.mixins import LoggingMixin
 
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class IPairList(LoggingMixin, ABC):
 
-    def __init__(self, exchange, pairlistmanager,
+    def __init__(self, exchange: Exchange, pairlistmanager,
                  config: Dict[str, Any], pairlistconfig: Dict[str, Any],
                  pairlist_pos: int) -> None:
         """
@@ -28,7 +28,7 @@ class IPairList(LoggingMixin, ABC):
         """
         self._enabled = True
 
-        self._exchange = exchange
+        self._exchange: Exchange = exchange
         self._pairlistmanager = pairlistmanager
         self._config = config
         self._pairlistconfig = pairlistconfig
@@ -68,12 +68,12 @@ class IPairList(LoggingMixin, ABC):
         filter_pairlist() method.
 
         :param pair: Pair that's currently validated
-        :param ticker: ticker dict as returned from ccxt.load_markets()
+        :param ticker: ticker dict as returned from ccxt.fetch_tickers()
         :return: True if the pair can stay, false if it should be removed
         """
         raise NotImplementedError()
 
-    def gen_pairlist(self, cached_pairlist: List[str], tickers: Dict) -> List[str]:
+    def gen_pairlist(self, tickers: Dict) -> List[str]:
         """
         Generate the pairlist.
 
@@ -84,8 +84,7 @@ class IPairList(LoggingMixin, ABC):
         it will raise the exception if a Pairlist Handler is used at the first
         position in the chain.
 
-        :param cached_pairlist: Previously generated pairlist (cached)
-        :param tickers: Tickers (from exchange.get_tickers()).
+        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
         :return: List of pairs
         """
         raise OperationalException("This Pairlist Handler should not be used "
@@ -124,10 +123,21 @@ class IPairList(LoggingMixin, ABC):
         """
         return self._pairlistmanager.verify_blacklist(pairlist, logmethod)
 
+    def verify_whitelist(self, pairlist: List[str], logmethod,
+                         keep_invalid: bool = False) -> List[str]:
+        """
+        Proxy method to verify_whitelist for easy access for child classes.
+        :param pairlist: Pairlist to validate
+        :param logmethod: Function that'll be called, `logger.info` or `logger.warning`
+        :param keep_invalid: If sets to True, drops invalid pairs silently while expanding regexes.
+        :return: pairlist - whitelisted pairs
+        """
+        return self._pairlistmanager.verify_whitelist(pairlist, logmethod, keep_invalid)
+
     def _whitelist_for_active_markets(self, pairlist: List[str]) -> List[str]:
         """
         Check available markets and remove pair from whitelist if necessary
-        :param whitelist: the sorted list of pairs the user might want to trade
+        :param pairlist: the sorted list of pairs the user might want to trade
         :return: the list of pairs the user wants to trade without those unavailable or
         black_listed
         """
@@ -157,7 +167,7 @@ class IPairList(LoggingMixin, ABC):
             # Check if market is active
             market = markets[pair]
             if not market_is_active(market):
-                logger.info(f"Ignoring {pair} from whitelist. Market is not active.")
+                self.log_once(f"Ignoring {pair} from whitelist. Market is not active.", logger.info)
                 continue
             if pair not in sanitized_whitelist:
                 sanitized_whitelist.append(pair)
